@@ -1,161 +1,160 @@
-import firebase_admin
-from firebase_admin import credentials
-from firebase_admin import firestore
+import sqlite3
+import pandas as pd
 import os
-import pandas as pd # Para manejar DataFrames si es necesario en las funciones de BD
+import numpy as np # Importar numpy para np.nan
 
 # --- Configuración de rutas (CONSTANTES) ---
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-CREDENTIALS_PATH = os.path.join(BASE_PATH, 'firebase_credentials.json')
+# Nombre del archivo de la base de datos SQLite
+DB_FILE_NAME = 'anime_characters.db' 
+DB_PATH = os.path.join(BASE_PATH, DB_FILE_NAME)
 
-# --- Inicialización de Firebase ---
-# Variable global para la instancia de Firestore
-db = None
+# --- Inicialización de la base de datos SQLite ---
+conn = None # Variable global para la conexión a la base de datos
 
-def initialize_firestore():
+def initialize_database():
     """
-    Inicializa la conexión a Firestore usando las credenciales de Firebase.
+    Inicializa la conexión a la base de datos SQLite y crea la tabla si no existe.
+    Esta función debe llamarse una vez al inicio de tu aplicación.
     """
-    global db
-    if firebase_admin._apps:  # Verifica si Firebase ya ha sido inicializado
-        print("Firebase ya inicializado.")
-        db = firestore.client()
-        return db
+    global conn
+    if conn is not None:
+        print("La base de datos SQLite ya está inicializada.")
+        return conn
 
-    if not os.path.exists(CREDENTIALS_PATH):
-        print(f"Error: Archivo de credenciales no encontrado en {CREDENTIALS_PATH}")
-        return None
-    
     try:
-        cred = credentials.Certificate(CREDENTIALS_PATH)
-        firebase_admin.initialize_app(cred)
-        db = firestore.client()
-        print("Firebase inicializado correctamente.")
-        return db
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        # Creamos la tabla si no existe
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS characters (
+                mal_id INTEGER PRIMARY KEY,
+                image_jpg_url TEXT,
+                about TEXT,
+                gender TEXT,
+                gender_numeric INTEGER,
+                local_image_path TEXT,
+                status TEXT
+            )
+        ''')
+        conn.commit()
+        print(f"Base de datos SQLite inicializada correctamente en: {DB_PATH}")
+        return conn
     except Exception as e:
-        print(f"Error al inicializar Firebase: {e}")
+        print(f"Error al inicializar la base de datos SQLite: {e}")
         return None
-    
-# --- Funciones de manejo de datos ---
+
+# --- Funciones para interactuar con SQLite ---
+
 def save_character_data(character_data: pd.DataFrame):
     """
-    Guarda los datos de los personajes en una colección de Firestore.
-    Cada fila del DataFrame se convierte en un documento.
-    La colección será 'anime_characters_data'.
+    Guarda o actualiza los datos de los personajes en la base de datos SQLite.
+    Utiliza INSERT OR REPLACE para actualizar si el mal_id ya existe.
     """
-    
-    if db is None:
-        print("Firestore no está inicializado. Por favor, llama a initialize_firestore() primero.")
+    if conn is None:
+        print("Error: Base de datos SQLite no inicializada. Llama a initialize_database() primero.")
         return False
+
+    print(f"\nGuardando/Actualizando {len(character_data)} personajes en SQLite...")
     
-    collection_ref = db.collection('anime_characters_data')
-    batch = db.batch()  # Usamos un batch para mejorar la eficiencia
+    # Convertir el DataFrame a una lista de tuplas para inserción
+    # Aseguramos el orden de las columnas para que coincida con la tabla
+    columns = [
+        'mal_id', 'image_jpg_url', 'about', 'gender', 
+        'gender_numeric', 'local_image_path', 'status'
+    ]
+    # Rellenar NaN con None para que SQLite los maneje correctamente
+    data_to_save = character_data[columns].replace({np.nan: None}).values.tolist()
 
-    print(f"Guardando {len(character_data)} personajes en Firestore...")
-    for index, row in character_data.iterrows():
-        # Usamos el ID para facilitar la búsqueda y actualización
-        doc_id = str(row['mal_id'])
-
-        # Preparamos los datos a guardar
-        # Convertimos a dict y manejamos NaN si es necesario
-        # Solo guardamos las columnas relevantes
-        data_to_save = {
-            'mal_id': row['mal_id'],
-            'image_jpg_url': row['image_jpg_url'],
-            'about': row['about'],
-            'gender': row['gender'], # 'chico', 'chica', 'unclassified'
-            'gender_numeric': int(row['gender_numeric']) if pd.notna(row['gender_numeric']) else None, # Convertir a int
-            'local_image_path': row['local_image_path'] if pd.notna(row['local_image_path']) else None,
-            'status': 'initial_load' # Un campo para rastrear el estado
-        }
-
-        #Elimnar claves con valores None si no queremos guardarlas
-        data_to_save = {k: v for k, v in data_to_save.items() if v is not None}
-
-        # Creamos una referencia al documento
-        doc_ref = collection_ref.document(doc_id)
-
-        # Añadimos el documento al batch
-        batch.set(doc_ref, data_to_save)
-
-        if (index + 1) % 500 == 0:  # Cada 100 documentos, hacemos commit
-            batch.commit()
-            batch = db.batch()
-            print(f"Guardados {index + 1} personajes hasta ahora...")
-
-    # Hacemos commit del último batch
+    cursor = conn.cursor()
     try:
-        batch.commit()
-        print(f"Todos los {len(character_data)} personajes guardados correctamente en Firestore.")
+        # Usamos INSERT OR REPLACE para que si el mal_id ya existe, se actualice la fila
+        # y si no existe, se inserte una nueva.
+        # CORRECCIÓN: Eliminado el 'f' innecesario al inicio de la cadena SQL
+        cursor.executemany('''
+            INSERT OR REPLACE INTO characters (
+                mal_id, image_jpg_url, about, gender, gender_numeric, local_image_path, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', data_to_save)
+        conn.commit()
+        print(f"Guardado/Actualización de datos completado. Total de documentos guardados/actualizados: {len(character_data)}")
         return True
     except Exception as e:
-        print(f"Error al guardar personajes en Firestore: {e}")
+        print(f"Error al guardar datos en SQLite: {e}")
         return False
-    
+
 def load_all_character_data():
     """
-    Carga todos los datos de personajes desde Firestore.
-    Devuelve un DataFrame de pandas con los datos.
+    Carga todos los documentos de la tabla 'characters' de SQLite
+    y los devuelve como un DataFrame de Pandas.
     """
-    
-    if db is None:
-        print("Firestore no está inicializado. Por favor, llama a initialize_firestore() primero.")
-        return None
-    
-    print("Cargando datos de personajes desde Firestore...")
-    # Obtenemos una referencia a la colección
-    collection_ref = db.collection('anime_characters_data')
-    docs = collection_ref.stream() # Obtenemos todos los documentos de la colección
+    if conn is None:
+        print("Error: Base de datos SQLite no inicializada. Llama a initialize_database() primero.")
+        return pd.DataFrame()
 
-    data = []
-    for doc in docs:
-        data.append(doc.to_dict())
-
-    if data:
-        df = pd.DataFrame(data)
-        print(f"Cargados {len(df)} personajes desde Firestore.")
+    print(f"\nCargando todos los personajes desde SQLite (Tabla: characters)...")
+    try:
+        df = pd.read_sql_query("SELECT * FROM characters", conn)
+        print(f"Cargados {len(df)} personajes desde SQLite.")
         return df
-    else:
-        print("No se encontraron datos de personajes en Firestore.")
-        return pd.DataFrame()  # Retorna un DataFrame vacío si no hay datos
-    
-def update_character_status(mal_id: int, new_status: str, gender_prediction = None):
-    """
-    Actualiza el estado de un personaje específico en Firestore.
-    Puede incluir una predicción de género si es relevante.
-    """
+    except pd.io.sql.DatabaseError as e:
+        print(f"Error al cargar datos desde SQLite: {e}")
+        print("Esto podría deberse a que la tabla aún no existe o está vacía.")
+        return pd.DataFrame() 
+    except Exception as e:
+        print(f"Error inesperado al cargar datos desde SQLite: {e}")
+        return pd.DataFrame()
 
-    if db is None:
-        print("Firestore no está inicializado. Por favor, llama a initialize_firestore() primero.")
+def update_character_status(mal_id: int, new_status: str, gender_prediction=None, local_image_path=None):
+    """
+    Actualiza el estado de un personaje específico en SQLite.
+    Puede incluir una predicción de género y la ruta local de la imagen.
+    """
+    if conn is None:
+        print("Error: Base de datos SQLite no inicializada. Llama a initialize_database() primero.")
         return False
-
-    doc_ref = db.collection('anime_characters_data').document(str(mal_id))  # Convertimos mal_id a string para Firestore
-    # Preparamos los datos a actualizar
-    update_data = {'status': new_status}  
-
+    
+    cursor = conn.cursor()
+    update_query = "UPDATE characters SET status = ?"
+    params = [new_status]
+    
     if gender_prediction is not None:
-        update_data['gender_prediction'] = gender_prediction # guardamos las predicciones de la IA
+        update_query += ", gender_prediction = ?"
+        params.append(gender_prediction)
+    if local_image_path is not None:
+        update_query += ", local_image_path = ?"
+        params.append(local_image_path)
+    
+    update_query += " WHERE mal_id = ?"
+    params.append(mal_id)
 
     try:
-        doc_ref.update(update_data)
-        print(f"Estado del personaje {mal_id} actualizado a '{new_status}'.")
+        cursor.execute(update_query, params)
+        conn.commit()
+        # print(f"Estado del personaje {mal_id} actualizado a '{new_status}'.") # Descomentar para ver actualizaciones individuales
         return True
     except Exception as e:
-        print(f"Error al actualizar el estado del personaje {mal_id}: {e}")
+        print(f"Error al actualizar el personaje {mal_id} en SQLite: {e}") 
         return False
-    
+
 # Bloque de ejecución principal para probar el módulo directamente
 if __name__ == "__main__":
-    # Inicializa Firestore
-    firestore_db = initialize_firestore()
-    if firestore_db:
+    db_conn = initialize_database()
+    if db_conn:
         print("\nPrueba de carga de datos (si ya existen)...")
         df_loaded = load_all_character_data()
         print(df_loaded.head())
 
+        print("\nGuardando datos de prueba...")
         test_data = pd.DataFrame([
             {'mal_id': 999999, 'image_jpg_url': 'test_url.jpg', 'about': 'Test character male', 'gender': 'chico', 'gender_numeric': 0, 'local_image_path': '/path/to/test.jpg', 'status': 'test_entry'},
             {'mal_id': 999998, 'image_jpg_url': 'test_url2.jpg', 'about': 'Test character female', 'gender': 'chica', 'gender_numeric': 1, 'local_image_path': '/path/to/test2.jpg', 'status': 'test_entry'}
         ])
         save_character_data(test_data)
-        update_character_status(999999, 'processed_by_test')
+        
+        print("\nActualizando estado de prueba...")
+        update_character_status(999999, 'processed_by_test_sqlite')
+        
+        print("\nCargando datos de prueba actualizados...")
+        df_updated = load_all_character_data()
+        print(df_updated[df_updated['mal_id'].isin([999999, 999998])])
