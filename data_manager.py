@@ -1,6 +1,7 @@
 import pandas as pd
 import os
 import requests
+import database_manager
 
 # Ruta relativa segura basada en la ubicación del script
 base_path = os.path.dirname(os.path.abspath(__file__))
@@ -151,6 +152,22 @@ def prepare_data():
     print(df_for_training_cleaned[['gender', 'gender_numeric', 'local_image_path']].head())
     print("\nPreparación de datos completada en data_manager.py.")
 
+    # Guardar / actualizar los datos en Firestore
+    print("Guardando datos de personajes en Firestore...")
+
+    # Combinamos los dataframes para guardar todo en una sola colección y actualizar sus estados
+    # Es importante que df_for_training_cleaned y df_for_later_inference mantengan las mismas columnas
+    # para que save_character_data pueda procesarlos.
+    # Aseguramos que 'gender_numeric' exista en df_for_later_inference para la unión
+    if 'gender_numeric' not in df_for_later_inference.columns:
+        df_for_later_inference['gender_numeric'] = None # O np.nan
+    if 'local_image_path' not in df_for_later_inference.columns:
+        df_for_later_inference['local_image_path'] = None # O np.nan
+
+    all_processed_data = pd.concat([df_for_training_cleaned, df_for_later_inference])
+    database_manager.save_character_data(all_processed_data)
+    print("Datos guardados en Firestore.")
+    
     return df_for_training_cleaned, df_for_later_inference
 
 # Esto asegura que prepare_data() solo se ejecute si el script se corre directamente
